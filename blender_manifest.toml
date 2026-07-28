@@ -6,7 +6,7 @@
 schema_version = "1.0.0"
 
 id = "object_data_autorename"
-version = "1.0.0"
+version = "1.0.1"
 name = "Object Data Auto Rename"
 tagline = "Keeps object-data names in sync with their object name"
 maintainer = "Marco Caturano"
