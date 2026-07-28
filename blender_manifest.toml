@@ -1,0 +1,35 @@
+# ------------------------------------------------------------------------------------------
+#  Copyright (c) Marco Caturano. All rights reserved.
+#  Licensed under the GPLv3 License. See LICENSE in the project root for license information.
+# ------------------------------------------------------------------------------------------
+
+schema_version = "1.0.0"
+
+id = "object_data_autorename"
+version = "1.0.0"
+name = "Object Data Auto Rename"
+tagline = "Keeps object-data names in sync with their object name"
+maintainer = "Marco Caturano"
+type = "add-on"
+
+# Source repository (required: this extension is GPL-licensed, source
+# must be publicly available).
+website = "https://github.com/Amon3DArt/blender-object-data-autorename"
+
+tags = ["Object", "Pipeline"]
+
+# Extensions require Blender 4.2+; this add-on is developed and tested
+# against 4.5 and 5.2.
+blender_version_min = "4.5.0"
+
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+
+copyright = [
+  "2026 Marco Caturano",
+]
+
+# No "permissions" entry: this add-on never touches the network, files,
+# clipboard, camera, or microphone, so none should be declared (declaring
+# unused permissions is flagged during moderation review).
