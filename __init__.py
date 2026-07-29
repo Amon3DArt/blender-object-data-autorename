@@ -21,7 +21,7 @@ from . import ui
 def register():
     preferences.register()
     core.register_msgbus()
-    core.register_depsgraph_handler()
+    core.register_undo_redo_handlers()
     ui.register()
 
     # Build the initial name-cache baseline without renaming anything.
@@ -37,7 +37,7 @@ def unregister():
         bpy.app.handlers.load_post.remove(_on_load_post)
 
     ui.unregister()
-    core.unregister_depsgraph_handler()
+    core.unregister_undo_redo_handlers()
     core.unregister_msgbus()
     preferences.unregister()
 

@@ -37,6 +37,30 @@ Race-condition / thread-safety notes
   registration and on `load_post`, so opening a file that legitimately
   has mismatched object/data names never triggers a mass-rename.
 
+Objects created during the session
+-----------------------------------
+Object creation (Add menu, duplicate, import, append, ...) does not
+emit an `Object.name` notification, so a brand-new object is not in
+`_name_cache` yet when the user renames it for the first time. Rather
+than watching for new objects with a `depsgraph_update_post` handler
+-- which would run on every scene re-evaluation and cost something on
+every single update, forever, just to catch a rare event -- this is
+resolved lazily, inside the sync pass that already runs *only* when a
+rename actually happened:
+
+Because the cache is fully rebuilt at registration and on every file
+load, any object missing from the cache necessarily appeared during
+the current session. When the sync runs, such an object is treated as
+just-renamed if it is currently selected or active, and is otherwise
+only recorded as a baseline. That selection test is reliable because
+every rename entry point operates on the selection: F2 renames the
+active object, an Outliner double-click makes its object active, and
+Batch Rename acts on the selected objects.
+
+The practical result is that this add-on costs literally nothing while
+the user is not renaming anything -- no handler on the dependency
+graph, no polling timer, no per-frame work.
+
 Multi-user data (instances)
 ----------------------------
 When several objects share the same object-data (e.g. Alt+D linked
@@ -64,10 +88,6 @@ _name_cache = {}
 # Debounce guard, see module docstring.
 _sync_scheduled = False
 
-# Cheap "did the object count change" guard for the depsgraph handler,
-# see _on_depsgraph_update_post() docstring below.
-_known_object_count = None
-
 
 def get_addon_preferences(context=None):
     """Return this add-on's AddonPreferences.
@@ -92,6 +112,30 @@ def _get_active_object():
     """
     view_layer = getattr(bpy.context, "view_layer", None)
     return view_layer.objects.active if view_layer else None
+
+
+def _get_selected_uids():
+    """Return the session_uids of the selected objects plus the active one.
+
+    Used to decide whether an object that is not yet in the name cache
+    (i.e. one created during this session) is the subject of the rename
+    that just triggered this sync. Every rename entry point acts on the
+    selection, so this is a reliable signal -- see the module docstring.
+
+    Guarded with getattr because `bpy.context` inside a deferred timer
+    callback may lack these members in background/headless contexts.
+    """
+    uids = set()
+
+    selected = getattr(bpy.context, "selected_objects", None)
+    if selected:
+        uids.update(obj.session_uid for obj in selected)
+
+    active = _get_active_object()
+    if active is not None:
+        uids.add(active.session_uid)
+
+    return uids
 
 
 def _pick_rename_target(objects_in_group, active_object):
@@ -126,6 +170,7 @@ def _sync_object_data_names():
 
     current_uids = set()
     renamed_objects = []
+    unseen_objects = []
 
     for obj in bpy.data.objects:
         uid = obj.session_uid
@@ -137,18 +182,32 @@ def _sync_object_data_names():
         # sync never leaves stale state behind.
         _name_cache[uid] = new_name
 
-        if old_name is None or old_name == new_name:
-            # Newly seen object, or no actual name change: skip.
-            continue
-
-        renamed_objects.append(obj)
+        if old_name is None:
+            # Not in the cache: the object appeared during this session
+            # (created, duplicated, imported, appended). Resolved below.
+            unseen_objects.append(obj)
+        elif old_name != new_name:
+            renamed_objects.append(obj)
 
     # Prune objects that no longer exist to avoid unbounded growth.
     for uid in list(_name_cache.keys()):
         if uid not in current_uids:
             del _name_cache[uid]
 
-    if not prefs.enabled or not renamed_objects:
+    if not prefs.enabled:
+        return None  # One-shot timer: do not repeat.
+
+    if unseen_objects:
+        # A rename just happened somewhere; any session-new object that
+        # is part of the current selection is almost certainly its
+        # subject, so treat it as renamed. Objects outside the selection
+        # are left alone and keep only the baseline recorded above.
+        selected_uids = _get_selected_uids()
+        renamed_objects.extend(
+            obj for obj in unseen_objects if obj.session_uid in selected_uids
+        )
+
+    if not renamed_objects:
         return None  # One-shot timer: do not repeat.
 
     # Group the objects that were just renamed by the object-data
@@ -196,62 +255,27 @@ def rebuild_cache_silently():
     object names must become the new baseline instead of being treated
     as pending renames.
     """
-    global _known_object_count
     _name_cache.clear()
     for obj in bpy.data.objects:
         _name_cache[obj.session_uid] = obj.name
-    _known_object_count = len(bpy.data.objects)
     return None  # One-shot timer compatible.
 
 
 @bpy.app.handlers.persistent
-def _on_depsgraph_update_post(scene, depsgraph):
-    """Seed newly created objects into the cache as soon as they appear.
+def _on_undo_redo_post(scene, _unused=None):
+    """Re-baseline the cache after an undo/redo step.
 
-    Object creation (Add menu, duplicate, append/link, import, ...) does
-    not reliably trigger an `Object.name` msgbus notification, since the
-    ID is often created before the RNA update-notification machinery is
-    attached to it. Without this handler, a brand-new object would only
-    enter `_name_cache` on its *first* rename -- which the sync function
-    would then (correctly, for the "existing object we never saw before"
-    case) treat as "just seed the baseline, don't rename yet", making
-    that very first rename silently ignored.
+    Undo/redo restores a previous state of the whole blend data, which
+    can bring objects back, remove them, or revert names. Rebuilding the
+    baseline here keeps the cache honest and avoids acting on a diff
+    that the user did not actually perform.
 
-    This handler only ever seeds/prunes `_name_cache`; it never renames
-    object-data, so it cannot interfere with the msgbus-driven sync
-    logic above.
-
-    The `len(bpy.data.objects)` check is a cheap early-exit so this does
-    not do a full pass on every single depsgraph update (which can fire
-    very frequently, e.g. during sculpting or animation playback) --
-    only when the object count actually changes.
+    This fires only when the user undoes or redoes something, so it adds
+    no cost to normal interaction. The optional second parameter keeps
+    the signature valid across Blender versions, which pass a varying
+    number of arguments to application handlers.
     """
-    global _known_object_count
-
-    if not get_addon_preferences().enabled:
-        # Feature is toggled off: don't even pay for the cheap length
-        # check below. The cache will simply pick up any objects it
-        # missed the next time the depsgraph handler runs after the
-        # feature is re-enabled (worst case: their very first rename
-        # after re-enabling only seeds the baseline, same as any newly
-        # discovered object -- see _sync_object_data_names()).
-        return
-
-    count = len(bpy.data.objects)
-    if _known_object_count is not None and count == _known_object_count:
-        return
-    _known_object_count = count
-
-    current_uids = set()
-    for obj in bpy.data.objects:
-        uid = obj.session_uid
-        current_uids.add(uid)
-        if uid not in _name_cache:
-            _name_cache[uid] = obj.name
-
-    for uid in list(_name_cache.keys()):
-        if uid not in current_uids:
-            del _name_cache[uid]
+    rebuild_cache_silently()
 
 
 def register_msgbus():
@@ -268,11 +292,13 @@ def unregister_msgbus():
     bpy.msgbus.clear_by_owner(_msgbus_owner)
 
 
-def register_depsgraph_handler():
-    if _on_depsgraph_update_post not in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph_update_post)
+def register_undo_redo_handlers():
+    for handlers in (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post):
+        if _on_undo_redo_post not in handlers:
+            handlers.append(_on_undo_redo_post)
 
 
-def unregister_depsgraph_handler():
-    if _on_depsgraph_update_post in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.remove(_on_depsgraph_update_post)
+def unregister_undo_redo_handlers():
+    for handlers in (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post):
+        if _on_undo_redo_post in handlers:
+            handlers.remove(_on_undo_redo_post)

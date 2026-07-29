@@ -13,3 +13,5 @@ Initial release.
   the add-on.
 - Preferences: per object-type filter (with matching Outliner icons),
   Select All / Deselect All, and an option to skip multi-user data.
+- Fully event-driven design: no dependency graph handler, no polling
+  timer, no per-frame work.

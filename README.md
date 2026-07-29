@@ -76,11 +76,15 @@ so the result is predictable rather than depending on internal ordering.
 
 ## Performance
 
-The sync is entirely event-driven (`bpy.msgbus` on `Object.name`, plus a
-cheap object-count check on `depsgraph_update_post` to catch newly
-created objects). There is no per-frame scanning and no polling. See the
-[project wiki](../../wiki) / issue tracker for more detail if you're
-profiling a very large scene.
+The sync is entirely event-driven: a single `bpy.msgbus` subscription on
+`Object.name`, whose work is deferred to a one-shot timer so nothing is
+mutated from inside an RNA notification.
+
+There is **no dependency graph handler, no polling timer, and no
+per-frame work**. While you are not renaming anything, this add-on costs
+nothing — scene playback, sculpting, simulation and viewport navigation
+are completely unaffected. The only pass over `bpy.data.objects` happens
+in response to an actual rename.
 
 ## Contributing
 
